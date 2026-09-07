@@ -19,3 +19,6 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 .venv/
+
+# the report may be committed
+!docs/*.pdf
