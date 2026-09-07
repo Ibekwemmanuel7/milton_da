@@ -1,0 +1,21 @@
+# data, weights and large artifacts stay out of the repository
+data/
+*.pt
+*.nc
+*.h5
+*.npz
+*.zip
+*.pdf
+dashboard_data.json
+norm_stats.json
+artifacts/
+Claude outputs/
+# stray root copies (the real ones live in assimilation/ and inference/)
+/guidance.py
+/run_milton.py
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/

@@ -1,0 +1,13 @@
+torch>=2.1
+numpy
+xarray
+netCDF4
+scipy
+pandas
+pyproj
+pytest
+s3fs
+earthaccess
+cdsapi
+h5netcdf
+requests

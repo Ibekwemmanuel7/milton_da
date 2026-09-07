@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "milton-da"
+version = "0.1.0"
+description = "Physics-guided score-based data assimilation for 3D hurricane retrieval from GOES + ATMS"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.1", "numpy", "xarray", "netCDF4", "h5netcdf", "scipy", "pandas", "pyproj", "s3fs", "earthaccess", "cdsapi", "requests"]
+
+[tool.setuptools.packages.find]
+include = ["milton_da*"]
