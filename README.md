@@ -8,9 +8,10 @@ encodes what real hurricanes look like, and a physics-guided reverse diffusion (
 assimilation) samples the posterior with a calibrated microwave observation operator and a
 static-stability constraint in the likelihood.
 
-**Interactive results:** `dashboard/index.html` (16 analysis times, 6 to 10 October 2024, with GOES
-imagery, warm-core evolution, diagnostics and the direct-versus-generative comparison).
-**Technical report:** see `docs/`.
+**Interactive results:** https://ibekwemmanuel7.github.io/milton_da/dashboard/ (16 analysis times,
+6 to 10 October 2024, with GOES imagery, warm-core evolution, diagnostics and the
+direct-versus-generative comparison). Source in `dashboard/index.html`.
+**Technical report:** `docs/milton_da_technical_report.docx`.
 
 ## Results in brief
 
