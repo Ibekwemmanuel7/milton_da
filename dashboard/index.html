@@ -180,7 +180,7 @@ footer{border-top:1px solid var(--rule);margin-top:40px;padding-top:18px;font-si
     <svg id="series" viewBox="0 0 1040 320"></svg><div class="tip" id="tip2"></div>
   </div>
   <div class="tbl"><table id="errtable"></table></div>
-  <p class="fine">Core: RMSE at 300 hPa in a 130 km box around the best-track centre. Domain: mean over ten levels on the full 128 x 128 grid. All runs 8 members x 500 steps. Two scenes have gaps in the ERA5/IMERG labels and are not scored.</p>
+  <p class="fine">Core: RMSE at 300 hPa in the central 16 x 16 pixel box (about 70 km at 4.4 km per pixel) around the best-track centre. Domain: mean over ten levels on the full 128 x 128 grid. All runs 8 members x 500 steps. Two scenes have gaps in the ERA5/IMERG labels and are not scored.</p>
 </section>
 
 <section id="method">
@@ -255,6 +255,20 @@ footer{border-top:1px solid var(--rule);margin-top:40px;padding-top:18px;font-si
     <div class="tile"><div class="n">4<span class="u">min</span></div><div class="l">per member at 250 steps on two CPU threads; a 2-member CPU run reproduced these warm cores to 0.1 K</div></div>
     <div class="tile"><div class="n">10<span class="u">to 50x</span></div><div class="l">expected reduction from step distillation or a deterministic corrector seeded by the proxy</div></div>
   </div>
+  <div class="eyebrow" style="margin-top:34px">Proxy architecture, tested</div>
+  <h3 style="margin:6px 0 8px">Three ways to make the U-Net proxy smarter, and why none of them stayed</h3>
+  <p>Four proxies trained on the same 805 scenes, 6,000 steps, seed and normaliser; only the network changed. A learned positional embedding, global self-attention over the infrared tokens at the 32 x 32 level, and a message-passing graph encoder over the valid sounder pixels (k-nearest-neighbour graph, k = 16, three rounds) in place of the convolutional microwave encoder. Train fit is the pooled RMSE on the training scenes, which the network has seen; the gap is validation minus train.</p>
+  <table>
+    <caption class="fine" style="text-align:left;padding:4px 0 8px">Proxy variants scored with one tool on the same scenes. Core: 300 hPa, central 16 x 16 pixels, 8 scenes with an ATMS overpass. Validation: 252 held-out 2023 scenes, all levels and pixels.</caption>
+    <thead><tr><th>proxy</th><th>params</th><th>train fit T (K)</th><th>val T (K)</th><th>gap (K)</th><th>val rain (mm/h)</th><th>core, ATMS (K)</th><th>core, all 16 (K)</th></tr></thead>
+    <tbody>
+      <tr><td>convolutional U-Net (used)</td><td>9.56 M</td><td>1.30</td><td class="ok">2.89</td><td class="ok">1.60</td><td class="ok">4.72</td><td class="ok">1.13</td><td class="ok">1.77</td></tr>
+      <tr><td>+ positional embedding</td><td>9.57 M</td><td>1.32</td><td>3.00</td><td>1.67</td><td>4.75</td><td class="warn">1.33</td><td>1.76</td></tr>
+      <tr><td>+ embedding + self-attention</td><td>9.70 M</td><td>1.32</td><td>2.97</td><td>1.65</td><td>4.60</td><td class="bad">1.53</td><td class="bad">2.16</td></tr>
+      <tr><td>graph microwave encoder</td><td>9.22 M</td><td>1.30</td><td class="warn">3.05</td><td class="warn">1.75</td><td class="warn">5.43</td><td class="warn">1.31</td><td>1.83</td></tr>
+    </tbody>
+  </table>
+  <div class="callout"><p>None of the three beat the plain U-Net, and all three lost in the inner core, where the sharpness matters. The more useful reading is the gap column: every variant fits the training scenes to about 1.3 K and every variant sits between 2.9 and 3.05 K on the held-out season. A 1.6 K gap shared by four architectures says the bottleneck is the 805-scene training set, not the network, so the next lever is data and regularisation rather than a fourth encoder. One seed each; the 0.2 to 0.4 K core differences carry a consistent sign across scenes, the 0.1 K validation differences do not.</p></div>
 </section>
 
 <section id="prior">
@@ -332,7 +346,7 @@ const isNum = v => typeof v === 'number' && isFinite(v);
   const at300 = peak.filter(p=>p===300||p===250||p===400).length;
   const tiles = [
     [`${Math.min(...dom).toFixed(1)} to ${Math.max(...dom).toFixed(1)}`,'K','domain temperature RMSE against ERA5, 14 scored scenes'],
-    [`${Math.min(...core).toFixed(1)} to ${Math.max(...core).toFixed(1)}`,'K','inner-core temperature RMSE at 300 hPa, 130 km box'],
+    [`${Math.min(...core).toFixed(1)} to ${Math.max(...core).toFixed(1)}`,'K','inner-core temperature RMSE at 300 hPa, central 16 x 16 pixels (about 70 km)'],
     [`${at300} of 16`,'','scenes with the warm core peaking at 250 to 400 hPa, where it belongs'],
     ['1.5','K','ATMS sounding-channel misfit after calibration; the ERA5 truth itself sits at 2.5 to 3 K'],
     [`${cov} of 16`,'','analysis times with an ATMS overpass; the rest are infrared plus prior'],
