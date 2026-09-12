@@ -64,6 +64,11 @@ class RetrievalEngine:
     @classmethod
     def from_checkpoints(cls, cfg: PipelineConfig, stats_path: str, unet_ckpt: str, score_ckpt: str, device=None) -> "RetrievalEngine":
         norm = Normalizer.load(stats_path)
+        # a checkpoint trained as an attention-encoder variant records its U-Net config; honour it
+        uc = torch.load(unet_ckpt, map_location="cpu").get("extra", {}).get("unet_cfg")
+        if uc:
+            cfg.unet.pos_embed = bool(uc.get("pos_embed", False))
+            cfg.unet.self_attn_levels = tuple(uc.get("self_attn_levels", ()))
         unet = CrossAttentionUNet(cfg.data, cfg.unet)
         load_checkpoint(unet_ckpt, unet)
         score = ScoreUNet(cfg.data, cfg.score)
@@ -75,9 +80,13 @@ class RetrievalEngine:
     def proxy(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         return self.unet(batch["ir"], batch["ir_mask"], batch["mw"], batch["mw_mask"], batch.get("mw_zen"))
 
-    def analyse(self, batch: Dict[str, torch.Tensor], ensemble_size: Optional[int] = None, log_every: int = 50) -> tuple[SamplerOutput, Observations]:
+    def analyse(self, batch: Dict[str, torch.Tensor], ensemble_size: Optional[int] = None, log_every: int = 50, proxy_no_mw: bool = False) -> tuple[SamplerOutput, Observations]:
         batch = {k: v.to(self.device) for k, v in batch.items()}
-        x_det = self.proxy(batch)                                                                      # [B, L+1, H, W]
+        if proxy_no_mw:      # experiment: the proxy sees only the infrared; ATMS reaches the state through the physics likelihood alone
+            pb = dict(batch); pb["mw"] = torch.zeros_like(batch["mw"]); pb["mw_mask"] = torch.zeros_like(batch["mw_mask"]); pb["mw_zen"] = torch.zeros_like(batch["mw_zen"])
+            x_det = self.proxy(pb)
+        else:
+            x_det = self.proxy(batch)                                                                      # [B, L+1, H, W]
         obs = Observations(x_det, batch["ir_raw"], batch["ir_mask"], batch["mw_raw"], batch["mw_mask"])
         out = self.sampler.sample(obs, ensemble_size=ensemble_size, log_every=log_every, callback=lambda d: log.info(f"  step {d['step']:4d} ir_rmse={d['ir_rmse_K']:.2f}K mw_rmse={d['mw_rmse_K']:.2f}K"))
         return out, obs
@@ -132,6 +141,7 @@ def main() -> None:
     ap.add_argument("--preset", choices=["small", "full"], default="full", help="must match the preset the checkpoints were trained with")
     ap.add_argument("--no-mw", action="store_true", help="ablation: zero the ATMS mask so the retrieval is infrared-only")
     ap.add_argument("--no-rtm", action="store_true", help="ablation: drop the radiative-transfer terms from the likelihood")
+    ap.add_argument("--proxy-no-mw", action="store_true", help="experiment: hide ATMS from the U-Net proxy; the calibrated physics likelihood alone carries the microwave")
     ap.add_argument("--sigma-unet", type=float, default=None, help="trust in the U-Net proxy (normalised units, default 0.5); raise it to let the physics term compete")
     ap.add_argument("--rtm-audit", default=None, help="rtm_audit.json from colab/audit_rtm_cell.py: per-channel bias correction and error sigma")
     ap.add_argument("--audit-table", default="archive_2023", help="which table in the audit file to calibrate from")
@@ -167,7 +177,7 @@ def main() -> None:
         batch = collate([ds_obj[i]])
         if args.no_mw:
             batch["mw_mask"].zero_(), batch["mw"].zero_(), batch["mw_zen"].zero_()
-        out, obs = engine.analyse(batch, ensemble_size=args.ensemble)
+        out, obs = engine.analyse(batch, ensemble_size=args.ensemble, proxy_no_mw=args.proxy_no_mw)
         result = engine.to_dataset(out, obs, scene, truth=batch["state"])
         path = os.path.join(args.out, os.path.basename(args.scenes[i]).replace(".nc", "_analysis.nc"))
         result.to_netcdf(path)

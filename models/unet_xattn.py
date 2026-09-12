@@ -25,7 +25,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..config import DataConfig, UNetConfig
-from .blocks import CrossAttention2D, Downsample, ResBlock, SelfAttention2D, Upsample, _gn
+from .blocks import CrossAttention2D, Downsample, LearnedGridPosEmb, ResBlock, SelfAttention2D, Upsample, _gn
 
 
 class MicrowaveContextEncoder(nn.Module):
@@ -57,16 +57,25 @@ class CrossAttentionUNet(nn.Module):
         c_ctx = chans[-1] // 2
         self.mw_encoder = MicrowaveContextEncoder(c_mw, c_ctx)
         self.inp = nn.Conv2d(c_ir, chans[0], 3, padding=1)
+        # Optional learned positional embedding on the level-0 feature map: gives the fully convolutional
+        # network a notion of where the storm centre is in the frame (zero-initialised: identity at start).
+        self.pos = LearnedGridPosEmb(chans[0], 256, 256) if cfg.pos_embed else None
+        if self.pos is not None:
+            nn.init.zeros_(self.pos.row), nn.init.zeros_(self.pos.col)
+        sa_levels = tuple(getattr(cfg, "self_attn_levels", ()) or ())
 
         # ---- encoder -----------------------------------------------------------------------
         self.enc_blocks = nn.ModuleList()
         self.enc_xattn = nn.ModuleDict()
+        self.enc_sattn = nn.ModuleDict()
         self.downs = nn.ModuleList()
         c_prev = chans[0]
         for i, c in enumerate(chans):
             self.enc_blocks.append(nn.ModuleList([ResBlock(c_prev if j == 0 else c, c, dropout=cfg.dropout) for j in range(cfg.n_res_blocks)]))
             if i in cfg.cross_attn_levels:
                 self.enc_xattn[str(i)] = CrossAttention2D(c, c_ctx, cfg.attn_heads)
+            if i in sa_levels:
+                self.enc_sattn[str(i)] = SelfAttention2D(c, cfg.attn_heads)       # global self-attention over IR tokens
             self.downs.append(Downsample(c) if i < len(chans) - 1 else nn.Identity())
             c_prev = c
 
@@ -76,6 +85,7 @@ class CrossAttentionUNet(nn.Module):
         # ---- decoder -----------------------------------------------------------------------
         self.dec_blocks = nn.ModuleList()
         self.dec_xattn = nn.ModuleDict()
+        self.dec_sattn = nn.ModuleDict()
         self.ups = nn.ModuleList()
         for i in reversed(range(len(chans))):
             c = chans[i]
@@ -83,6 +93,8 @@ class CrossAttentionUNet(nn.Module):
             self.dec_blocks.append(nn.ModuleList([ResBlock(c_in if j == 0 else c, c, dropout=cfg.dropout) for j in range(cfg.n_res_blocks)]))
             if i in cfg.cross_attn_levels:
                 self.dec_xattn[str(i)] = CrossAttention2D(c, c_ctx, cfg.attn_heads)
+            if i in sa_levels:
+                self.dec_sattn[str(i)] = SelfAttention2D(c, cfg.attn_heads)
             self.ups.append(Upsample(c) if i > 0 else nn.Identity())
 
         self.out = nn.Sequential(_gn(chans[0]), nn.SiLU(), nn.Conv2d(chans[0], self.out_channels, 3, padding=1))
@@ -100,12 +112,17 @@ class CrossAttentionUNet(nn.Module):
             mw_zen = torch.zeros_like(mw_mask)
         ctx = self.mw_encoder(mw, mw_mask, mw_zen)                      # [B, C_ctx, h, w]
         h = self.inp(torch.cat([ir, ir_mask], dim=1))                   # [B, C0, H, W]
+        if self.pos is not None:
+            B_, C0, H, W = h.shape
+            h = h + self.pos(H, W).transpose(0, 1).reshape(1, C0, H, W)     # learned "where am I in the frame"
         skips: List[torch.Tensor] = []
         for i, (blocks, down) in enumerate(zip(self.enc_blocks, self.downs)):
             for b in blocks:
                 h = b(h)
             if str(i) in self.enc_xattn:
                 h = self.enc_xattn[str(i)](h, ctx, mw_mask)             # IR queries attend to MW tokens
+            if str(i) in self.enc_sattn:
+                h = self.enc_sattn[str(i)](h)                           # IR tokens attend to each other (global)
             skips.append(h)
             h = down(h)                                                  # [B, C_i, H/2^(i+1), ...]
         for m in self.mid:
@@ -117,6 +134,8 @@ class CrossAttentionUNet(nn.Module):
                 h = b(h)
             if str(i) in self.dec_xattn:
                 h = self.dec_xattn[str(i)](h, ctx, mw_mask)
+            if str(i) in self.dec_sattn:
+                h = self.dec_sattn[str(i)](h)
             h = up(h)
         return self.out(h)                                               # [B, L+1, H, W]
 

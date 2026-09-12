@@ -22,3 +22,7 @@ __pycache__/
 
 # the report may be committed
 !docs/*.pdf
+
+docs/Tomorrow_io_*
+docs/Milton_DA_Interview_Deck.*
+

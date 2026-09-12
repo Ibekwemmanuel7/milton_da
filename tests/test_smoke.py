@@ -69,6 +69,28 @@ def test_cross_attention_unet_masks(setup):
     assert x.shape == b["state"].shape and torch.isfinite(x).all()
 
 
+def test_attention_encoder_variant(setup):
+    """The experiment variant (positional embedding + IR self-attention) must (a) load a baseline
+    state dict without the new modules, (b) start as the same function as the baseline (all new
+    parameters are zero-initialised), and (c) train: the new parameters receive gradient."""
+    import copy
+    cfg, scenes, norm, ds = setup
+    base = CrossAttentionUNet(cfg.data, cfg.unet)
+    vcfg = copy.deepcopy(cfg.unet)
+    vcfg.pos_embed, vcfg.self_attn_levels = True, (1, 2)
+    var = CrossAttentionUNet(cfg.data, vcfg)
+    missing, unexpected = var.load_state_dict(base.state_dict(), strict=False)
+    assert not unexpected and all(k.startswith(("pos.", "enc_sattn.", "dec_sattn.")) for k in missing)
+    b = collate([ds[0], ds[1]])
+    with torch.no_grad():
+        x0, x1 = base(b["ir"], b["ir_mask"], b["mw"], b["mw_mask"]), var(b["ir"], b["ir_mask"], b["mw"], b["mw_mask"])
+    assert x1.shape == b["state"].shape and torch.allclose(x0, x1, atol=1e-5)
+    loss = ((var(b["ir"], b["ir_mask"], b["mw"], b["mw_mask"]) - b["state"]) ** 2).mean()
+    loss.backward()
+    assert var.pos.row.grad is not None and var.pos.row.grad.abs().sum() > 0
+    assert var.enc_sattn["2"].out.weight.grad.abs().sum() > 0
+
+
 def test_end_to_end_train_and_assimilate(setup):
     cfg, scenes, norm, ds = setup
     d = cfg.data

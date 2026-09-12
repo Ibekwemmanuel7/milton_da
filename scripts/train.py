@@ -109,7 +109,13 @@ def main(argv=None) -> int:
     ap.add_argument("--lr", type=float, default=None)
     ap.add_argument("--resume", action="store_true", help="continue the prior from <out>/checkpoints/score.pt (saved every 500 steps)")
     ap.add_argument("--sample-only", action="store_true", help="only draw prior samples from the existing score checkpoint")
+    ap.add_argument("--unet-pos-embed", action="store_true", help="experiment: learned 2D positional embedding on the U-Net input features")
+    ap.add_argument("--unet-self-attn-levels", nargs="*", type=int, default=None, help="experiment: U-Net levels given global self-attention over IR tokens, e.g. 1 2")
+    ap.add_argument("--unet-ckpt-name", default="unet.pt", help="checkpoint file name for the U-Net (use a new name for an experiment so unet.pt is not overwritten)")
+    ap.add_argument("--seed", type=int, default=None, help="torch/numpy seed for a reproducible run")
     args = ap.parse_args(argv)
+    if args.seed is not None:
+        torch.manual_seed(args.seed); np.random.seed(args.seed)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     cfg = PipelineConfig()
@@ -123,6 +129,11 @@ def main(argv=None) -> int:
         cfg.train.lambda_rtm_consistency = args.lambda_rtm
     if args.lr is not None:
         cfg.train.lr = args.lr
+    if args.unet_pos_embed:
+        cfg.unet.pos_embed = True
+    if args.unet_self_attn_levels is not None:
+        cfg.unet.self_attn_levels = tuple(args.unet_self_attn_levels)
+    log.info(f"U-Net variant: pos_embed={cfg.unet.pos_embed} self_attn_levels={tuple(cfg.unet.self_attn_levels)} -> checkpoints/{args.unet_ckpt_name}")
     device = get_device()
     log.info(f"device {device}; preset {args.preset}; downscale {args.downscale}")
 
@@ -158,7 +169,7 @@ def main(argv=None) -> int:
         return 0
     if not args.skip_unet:
         log.info(f"stage 1: U-Net proxy for {args.unet_steps} steps")
-        train_unet(cfg, train_ds, val_ds, norm, rtm, max_steps=args.unet_steps, device=device)
+        train_unet(cfg, train_ds, val_ds, norm, rtm, max_steps=args.unet_steps, device=device, ckpt_name=args.unet_ckpt_name)
     if not args.skip_score:
         log.info(f"stage 2: diffusion prior for {args.score_steps} steps")
         model, ema = train_score(cfg, train_ds, max_steps=args.score_steps, device=device, resume=args.resume)

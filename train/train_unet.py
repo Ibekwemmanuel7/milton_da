@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import asdict
 from typing import Dict, Optional
 
 import torch
@@ -49,7 +50,7 @@ def unet_loss(model: CrossAttentionUNet, batch: Dict[str, torch.Tensor], norm: N
     return out
 
 
-def train_unet(cfg: PipelineConfig, train_ds: Dataset, val_ds: Optional[Dataset], norm: Normalizer, rtm: Optional[AnalyticRTM] = None, max_steps: Optional[int] = None, device=None) -> CrossAttentionUNet:
+def train_unet(cfg: PipelineConfig, train_ds: Dataset, val_ds: Optional[Dataset], norm: Normalizer, rtm: Optional[AnalyticRTM] = None, max_steps: Optional[int] = None, device=None, ckpt_name: str = "unet.pt") -> CrossAttentionUNet:
     device = device or get_device()
     tc = cfg.train
     model = CrossAttentionUNet(cfg.data, cfg.unet).to(device)
@@ -75,7 +76,7 @@ def train_unet(cfg: PipelineConfig, train_ds: Dataset, val_ds: Optional[Dataset]
             step += 1
             meter.maybe_log(step)
             if step % 1000 == 0 or step == total:
-                save_checkpoint(os.path.join(tc.ckpt_dir, "unet.pt"), model, opt, step=step)
+                save_checkpoint(os.path.join(tc.ckpt_dir, ckpt_name), model, opt, step=step, extra={"unet_cfg": asdict(cfg.unet)})
                 if val_ds is not None:
                     log.info(f"val {validate_unet(model, val_ds, norm, rtm, cfg, device)}")
             if step >= total:

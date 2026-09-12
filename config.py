@@ -80,6 +80,9 @@ class UNetConfig:
     attn_heads: int = 8
     cross_attn_levels: Sequence[int] = (2, 3)      # encoder depths at which MW cross-attention is applied
     dropout: float = 0.0
+    # Attention-encoder variant (experiment, off by default so existing checkpoints load unchanged):
+    pos_embed: bool = False                        # learned 2D positional embedding added to the level-0 IR features
+    self_attn_levels: Sequence[int] = ()           # encoder/decoder depths given global self-attention over IR tokens
 
 
 @dataclass
