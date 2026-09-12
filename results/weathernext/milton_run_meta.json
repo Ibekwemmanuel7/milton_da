@@ -1,0 +1,12 @@
+{
+ "model": "WeatherNextCyclones_Mini",
+ "split": "2024",
+ "resolution_deg": "1.0",
+ "steps": 20,
+ "init_time": "2024-10-07 00:00:00",
+ "members": 8,
+ "data_path": "weathernext2/dataset/source-hres_forecast_init-2024-10-07 00:00:00_res-1.0_levels-13_steps-20.nc",
+ "weights_path": "weathernext2/params/WeatherNextCyclones_Mini_<2024.npz",
+ "backend": "tpu",
+ "devices": 1
+}
