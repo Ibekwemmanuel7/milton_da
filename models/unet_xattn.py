@@ -26,6 +26,7 @@ import torch.nn.functional as F
 
 from ..config import DataConfig, UNetConfig
 from .blocks import CrossAttention2D, Downsample, LearnedGridPosEmb, ResBlock, SelfAttention2D, Upsample, _gn
+from .gnn import GraphMicrowaveEncoder
 
 
 class MicrowaveContextEncoder(nn.Module):
@@ -55,7 +56,10 @@ class CrossAttentionUNet(nn.Module):
         self.n_levels, self.out_channels = data_cfg.n_levels, data_cfg.state_channels
         chans = [cfg.base_channels * m for m in cfg.channel_mults]
         c_ctx = chans[-1] // 2
-        self.mw_encoder = MicrowaveContextEncoder(c_mw, c_ctx)
+        if getattr(cfg, "mw_encoder", "grid") == "graph":
+            self.mw_encoder = GraphMicrowaveEncoder(c_mw, c_ctx, k=cfg.graph_k, n_rounds=cfg.graph_rounds)   # experiment: message passing
+        else:
+            self.mw_encoder = MicrowaveContextEncoder(c_mw, c_ctx)
         self.inp = nn.Conv2d(c_ir, chans[0], 3, padding=1)
         # Optional learned positional embedding on the level-0 feature map: gives the fully convolutional
         # network a notion of where the storm centre is in the frame (zero-initialised: identity at start).

@@ -83,6 +83,9 @@ class UNetConfig:
     # Attention-encoder variant (experiment, off by default so existing checkpoints load unchanged):
     pos_embed: bool = False                        # learned 2D positional embedding added to the level-0 IR features
     self_attn_levels: Sequence[int] = ()           # encoder/decoder depths given global self-attention over IR tokens
+    mw_encoder: str = "grid"                       # "grid": convolutional context encoder (default); "graph": kNN message passing (models/gnn.py)
+    graph_k: int = 16                              # neighbours per node for the graph encoder
+    graph_rounds: int = 3                          # message-passing rounds
 
 
 @dataclass

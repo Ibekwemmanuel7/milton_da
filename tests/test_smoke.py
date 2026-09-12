@@ -91,6 +91,45 @@ def test_attention_encoder_variant(setup):
     assert var.enc_sattn["2"].out.weight.grad.abs().sum() > 0
 
 
+def test_graph_microwave_encoder(setup):
+    """The graph encoder must match the convolutional encoder's output shape, ignore invalid pixels
+    (a sample with no microwave coverage yields an all-zero context and a finite proxy), build a
+    graph whose neighbours are all valid nodes, and pass gradient to its parameters."""
+    import copy
+    from milton_da.models.gnn import GraphMicrowaveEncoder
+    cfg, scenes, norm, ds = setup
+    vcfg = copy.deepcopy(cfg.unet)
+    vcfg.mw_encoder, vcfg.graph_k, vcfg.graph_rounds = "graph", 8, 2
+    net = CrossAttentionUNet(cfg.data, vcfg)
+    assert isinstance(net.mw_encoder, GraphMicrowaveEncoder)
+    b = collate([ds[0], ds[1]])
+    b["mw_mask"][1] = 0.0
+    b["mw_mask"][0, :, :, : b["mw_mask"].shape[-1] // 2] = 0.0          # half swath on sample 0
+    b["mw"] = b["mw"] * b["mw_mask"]
+    valid = b["mw_mask"].flatten(1)
+    nbr, edge, nbr_valid = net.mw_encoder.build_graph(valid, *b["mw_mask"].shape[-2:])
+    picked_valid = torch.gather(valid, 1, nbr.reshape(valid.shape[0], -1)).view_as(nbr)
+    assert torch.all((picked_valid > 0.5) | (nbr_valid < 0.5))            # every unmasked link points at a valid node
+    assert nbr_valid[1].sum() == 0                                          # no valid neighbours at all for sample 1
+    ctx = net.mw_encoder(b["mw"], b["mw_mask"], b["mw_zen"])
+    assert ctx.shape[-2:] == b["mw"].shape[-2:] and torch.isfinite(ctx).all()
+    assert ctx[1].abs().sum() == 0 and (ctx[0] * (1 - b["mw_mask"][0])).abs().sum() == 0
+    x = net(b["ir"], b["ir_mask"], b["mw"], b["mw_mask"], b["mw_zen"])
+    assert x.shape == b["state"].shape and torch.isfinite(x).all()
+    # gradient flow: the cross-attention gates and the node-update output are zero at init (identity
+    # start), which correctly blocks gradient into the encoder at step 0; open them and check it flows
+    with torch.no_grad():
+        for g in list(net.enc_xattn.values()) + list(net.dec_xattn.values()):
+            g.gate.fill_(1.0)
+        for layer in net.mw_encoder.layers:
+            nn_last = layer.node_mlp[-1]
+            nn_last.weight.normal_(0, 0.02)
+    x = net(b["ir"], b["ir_mask"], b["mw"], b["mw_mask"], b["mw_zen"])
+    ((x - b["state"]) ** 2).mean().backward()
+    assert net.mw_encoder.embed[0].weight.grad.abs().sum() > 0
+    assert net.mw_encoder.layers[0].edge_mlp[0].weight.grad.abs().sum() > 0
+
+
 def test_end_to_end_train_and_assimilate(setup):
     cfg, scenes, norm, ds = setup
     d = cfg.data

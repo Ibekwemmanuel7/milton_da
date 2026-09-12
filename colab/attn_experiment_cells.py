@@ -59,3 +59,30 @@ A='/content/drive/MyDrive/milton_artifacts'
     --stats $A/norm_stats.json --unet $A/checkpoints/unet_attn.pt --score $A/checkpoints/score.pt --rtm-audit $A/rtm_audit.json \
     --out $A/milton_v3_attn --preset small --downscale 2 --ensemble 8 --steps 500
 """
+
+# ======================================================================================
+# Graph microwave encoder experiment (patch 5). Same prerequisites; patch 5 supersedes patch 4.
+# ======================================================================================
+
+# ---------- CELL G: train the graph-encoder proxy (about 20 minutes on the T4) ----------
+"""
+%cd /content
+A='/content/drive/MyDrive/milton_artifacts'
+!python -m milton_da.scripts.train --archive data/archive --out $A --preset small --downscale 2 \
+    --val-seasons 2023 --unet-steps 6000 --lambda-rtm 0.01 --num-workers 2 --skip-score --seed 0 \
+    --mw-encoder graph --graph-k 16 --graph-rounds 3 --unet-ckpt-name unet_graph.pt
+"""
+
+# ---------- CELL H: score all four proxies side by side ----------
+# --split both scores the 805 training scenes and the 252 validation scenes as two separate lines
+# (never pooled: the network has seen the training scenes). The extra line is the train-to-validation
+# gap, the overfitting / underfitting diagnostic. Adds about 3 minutes per checkpoint on a T4.
+# Use --split val (the default) to skip the training pass.
+"""
+%cd /content
+A='/content/drive/MyDrive/milton_artifacts'
+!python -m milton_da.scripts.eval_unet --stats $A/norm_stats.json --preset small --downscale 2 \
+    --archive data/archive --val-seasons 2023 --split both --milton data/milton/scenes \
+    --ckpt baseline=$A/checkpoints/unet.pt --ckpt graph=$A/checkpoints/unet_graph.pt \
+    --ckpt pos=$A/checkpoints/unet_pos.pt --ckpt attn=$A/checkpoints/unet_attn.pt --out $A/eval_unet_variants.json
+"""

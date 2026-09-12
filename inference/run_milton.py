@@ -69,6 +69,9 @@ class RetrievalEngine:
         if uc:
             cfg.unet.pos_embed = bool(uc.get("pos_embed", False))
             cfg.unet.self_attn_levels = tuple(uc.get("self_attn_levels", ()))
+            cfg.unet.mw_encoder = uc.get("mw_encoder", "grid")
+            cfg.unet.graph_k = int(uc.get("graph_k", 16))
+            cfg.unet.graph_rounds = int(uc.get("graph_rounds", 3))
         unet = CrossAttentionUNet(cfg.data, cfg.unet)
         load_checkpoint(unet_ckpt, unet)
         score = ScoreUNet(cfg.data, cfg.score)

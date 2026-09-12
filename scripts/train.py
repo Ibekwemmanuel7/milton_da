@@ -112,6 +112,9 @@ def main(argv=None) -> int:
     ap.add_argument("--unet-pos-embed", action="store_true", help="experiment: learned 2D positional embedding on the U-Net input features")
     ap.add_argument("--unet-self-attn-levels", nargs="*", type=int, default=None, help="experiment: U-Net levels given global self-attention over IR tokens, e.g. 1 2")
     ap.add_argument("--unet-ckpt-name", default="unet.pt", help="checkpoint file name for the U-Net (use a new name for an experiment so unet.pt is not overwritten)")
+    ap.add_argument("--mw-encoder", choices=["grid", "graph"], default=None, help="experiment: microwave context encoder, convolutional (grid) or kNN message passing (graph)")
+    ap.add_argument("--graph-k", type=int, default=None)
+    ap.add_argument("--graph-rounds", type=int, default=None)
     ap.add_argument("--seed", type=int, default=None, help="torch/numpy seed for a reproducible run")
     args = ap.parse_args(argv)
     if args.seed is not None:
@@ -133,7 +136,13 @@ def main(argv=None) -> int:
         cfg.unet.pos_embed = True
     if args.unet_self_attn_levels is not None:
         cfg.unet.self_attn_levels = tuple(args.unet_self_attn_levels)
-    log.info(f"U-Net variant: pos_embed={cfg.unet.pos_embed} self_attn_levels={tuple(cfg.unet.self_attn_levels)} -> checkpoints/{args.unet_ckpt_name}")
+    if args.mw_encoder is not None:
+        cfg.unet.mw_encoder = args.mw_encoder
+    if args.graph_k is not None:
+        cfg.unet.graph_k = args.graph_k
+    if args.graph_rounds is not None:
+        cfg.unet.graph_rounds = args.graph_rounds
+    log.info(f"U-Net variant: pos_embed={cfg.unet.pos_embed} self_attn_levels={tuple(cfg.unet.self_attn_levels)} mw_encoder={cfg.unet.mw_encoder} (k={cfg.unet.graph_k}, rounds={cfg.unet.graph_rounds}) -> checkpoints/{args.unet_ckpt_name}")
     device = get_device()
     log.info(f"device {device}; preset {args.preset}; downscale {args.downscale}")
 

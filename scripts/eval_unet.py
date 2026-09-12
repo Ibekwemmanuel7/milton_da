@@ -41,10 +41,13 @@ def build(cfg: PipelineConfig, path: str) -> CrossAttentionUNet:
     uc = ck.get("extra", {}).get("unet_cfg") or {}
     cfg.unet.pos_embed = bool(uc.get("pos_embed", False))
     cfg.unet.self_attn_levels = tuple(uc.get("self_attn_levels", ()))
+    cfg.unet.mw_encoder = uc.get("mw_encoder", "grid")
+    cfg.unet.graph_k = int(uc.get("graph_k", 16))
+    cfg.unet.graph_rounds = int(uc.get("graph_rounds", 3))
     net = CrossAttentionUNet(cfg.data, cfg.unet)
     load_checkpoint(path, net)
     n = sum(p.numel() for p in net.parameters())
-    log.info(f"{path}: step {ck.get('step', '?')}, pos_embed={cfg.unet.pos_embed}, self_attn_levels={cfg.unet.self_attn_levels}, {n/1e6:.2f} M params")
+    log.info(f"{path}: step {ck.get('step', '?')}, pos_embed={cfg.unet.pos_embed}, self_attn_levels={cfg.unet.self_attn_levels}, mw_encoder={cfg.unet.mw_encoder}, {n/1e6:.2f} M params")
     return net.eval()
 
 
@@ -69,6 +72,8 @@ def main(argv=None) -> int:
     ap.add_argument("--downscale", type=int, default=2)
     ap.add_argument("--archive", default=None, help="archive root; validation scenes are picked by --val-seasons")
     ap.add_argument("--val-seasons", nargs="*", type=int, default=[2023])
+    ap.add_argument("--split", choices=["val", "train", "both"], default="val",
+                    help="which archive scenes to score; 'both' reports train and val separately (never pooled)")
     ap.add_argument("--milton", default=None, help="folder of MILTON_*.nc scenes")
     ap.add_argument("--ckpt", action="append", required=True, help="name=path, repeatable")
     ap.add_argument("--batch", type=int, default=4)
@@ -90,18 +95,27 @@ def main(argv=None) -> int:
         res = {}
 
         if args.archive:
-            _, val_paths = split_scenes(args.archive, args.val_seasons)
-            ds = HurricaneSceneDataset(val_paths, d, norm, augment=False, downscale=args.downscale)
-            loader = DataLoader(ds, batch_size=args.batch, collate_fn=collate)
-            se_t = se_p = n_t = n_p = 0.0
-            for batch in loader:
-                x_det, batch = predict(net, batch, device)
-                t_hat, p_hat = norm.state_to_physical(x_det, d.precip_log_transform)
-                t_true, p_true = norm.state_to_physical(batch["state"], d.precip_log_transform)
-                se_t += float(((t_hat - t_true) ** 2).sum()); n_t += t_true.numel()
-                se_p += float(((p_hat - p_true) ** 2).sum()); n_p += p_true.numel()
-            res["val"] = {"scenes": len(ds), "temp_rmse_K": round((se_t / n_t) ** 0.5, 3), "precip_rmse_mmh": round((se_p / n_p) ** 0.5, 3)}
-            log.info(f"[{name}] validation {args.val_seasons}: {res['val']}")
+            train_paths, val_paths = split_scenes(args.archive, args.val_seasons)
+            # Train and validation are always scored separately: the network has seen the training
+            # scenes, so a pooled train+val number would be contaminated. The pair is the
+            # train-versus-validation gap (overfitting / underfitting diagnostic).
+            splits = {"val": val_paths} if args.split == "val" else {"train": train_paths} if args.split == "train" else {"train": train_paths, "val": val_paths}
+            for split_name, paths in splits.items():
+                ds = HurricaneSceneDataset(paths, d, norm, augment=False, downscale=args.downscale)
+                loader = DataLoader(ds, batch_size=args.batch, collate_fn=collate)
+                se_t = se_p = n_t = n_p = 0.0
+                for batch in loader:
+                    x_det, batch = predict(net, batch, device)
+                    t_hat, p_hat = norm.state_to_physical(x_det, d.precip_log_transform)
+                    t_true, p_true = norm.state_to_physical(batch["state"], d.precip_log_transform)
+                    se_t += float(((t_hat - t_true) ** 2).sum()); n_t += t_true.numel()
+                    se_p += float(((p_hat - p_true) ** 2).sum()); n_p += p_true.numel()
+                res[split_name] = {"scenes": len(ds), "temp_rmse_K": round((se_t / n_t) ** 0.5, 3), "precip_rmse_mmh": round((se_p / n_p) ** 0.5, 3)}
+                label = f"validation {args.val_seasons}" if split_name == "val" else "training (seen by the network; fit, not skill)"
+                log.info(f"[{name}] {label}: {res[split_name]}")
+            if "train" in res and "val" in res:
+                res["gap_temp_K"] = round(res["val"]["temp_rmse_K"] - res["train"]["temp_rmse_K"], 3)
+                log.info(f"[{name}] train-to-validation gap: {res['gap_temp_K']:+.3f} K temperature")
 
         if args.milton:
             paths = sorted(glob.glob(os.path.join(args.milton, "MILTON_*.nc")))
@@ -142,7 +156,9 @@ def main(argv=None) -> int:
         for n in names:
             m = results[n].get("milton", {}).get("summary", {})
             v = results[n].get("val", {})
-            log.info(f"  {n:>12s}: val T {v.get('temp_rmse_K')} K, val P {v.get('precip_rmse_mmh')} mm/h | core(ATMS) {m.get('core_rmse_300_K_atms_mean')} K, core(all) {m.get('core_rmse_300_K_all_mean')} K, domain {m.get('domain_rmse_300_K_all_mean')} K")
+            tr = results[n].get("train", {})
+            trs = f"train T {tr.get('temp_rmse_K')} K (gap {results[n].get('gap_temp_K')}) | " if tr and v else (f"train T {tr.get('temp_rmse_K')} K | " if tr else "")
+            log.info(f"  {n:>12s}: {trs}val T {v.get('temp_rmse_K')} K, val P {v.get('precip_rmse_mmh')} mm/h | core(ATMS) {m.get('core_rmse_300_K_atms_mean')} K, core(all) {m.get('core_rmse_300_K_all_mean')} K, domain {m.get('domain_rmse_300_K_all_mean')} K")
     if args.out:
         with open(args.out, "w") as f:
             json.dump(results, f, indent=1)
