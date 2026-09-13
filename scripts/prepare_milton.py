@@ -5,7 +5,10 @@ Build the Hurricane Milton scene cache from the public archives.
         --start 2024-10-06T00 --end 2024-10-10T00 --step-hours 6 \
         [--times 2024-10-07T06 2024-10-07T18 ...] [--dry-run]
 
-Steps: IBTrACS track -> analysis times and centres -> GOES-16 (nearest scan), ATMS (nearest overpass
+Any storm in IBTrACS works: --storm MELISSA --season 2025 --start 2025-10-25T00 --end 2025-10-29T00 --goes-satellite goes19
+(GOES-East has been GOES-19 since April 2025; the Milton scenes came from GOES-16).
+
+Steps: IBTrACS track -> analysis times and centres -> GOES-East (nearest scan), ATMS (nearest overpass
 from SNPP/NOAA-20/NOAA-21), IMERG (containing half hour), ERA5 (one request per day) -> manifest.json
 -> scene NetCDFs under <root>/scenes. Re-runs are incremental: existing files are not fetched again.
 """
@@ -44,6 +47,8 @@ def main(argv=None) -> int:
     ap.add_argument("--step-hours", type=int, default=6)
     ap.add_argument("--times", nargs="*", default=None, help="explicit analysis times (override start/end/step)")
     ap.add_argument("--goes-product", default=None, help="force ABI-L2-CMIPF or ABI-L2-CMIPC")
+    ap.add_argument("--goes-satellite", default="goes16", choices=["goes16", "goes18", "goes19"],
+                    help="GOES-East was GOES-16 until April 2025 and GOES-19 after; use goes19 for 2025 storms")
     ap.add_argument("--dry-run", action="store_true", help="resolve track and times, download nothing")
     ap.add_argument("--rebuild", action="store_true", help="rebuild scene NetCDFs even if they exist (raw files are reused)")
     args = ap.parse_args(argv)
@@ -63,7 +68,8 @@ def main(argv=None) -> int:
     if args.dry_run:
         return 0
 
-    goes = download_goes(times, centers, cfg.data.ir_channels, os.path.join(raw, "goes16"), tol_min=cfg.data.ir_time_tolerance_min, product=args.goes_product)
+    goes = download_goes(times, centers, cfg.data.ir_channels, os.path.join(raw, args.goes_satellite), satellite=args.goes_satellite,
+                         tol_min=cfg.data.ir_time_tolerance_min, product=args.goes_product)
     atms = download_atms(times, centers, os.path.join(raw, "atms"), tol_min=cfg.data.mw_time_tolerance_min)
     imerg = download_imerg(times, os.path.join(raw, "imerg"))
     area = storm_area([c[0] for c in centers], [c[1] for c in centers])
