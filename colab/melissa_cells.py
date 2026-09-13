@@ -164,3 +164,78 @@ plt.tight_layout(); os.makedirs(f'{A}/melissa_results', exist_ok=True)
 plt.savefig(f'{A}/melissa_results/melissa_summary.png', dpi=140); plt.show()
 D.to_csv(f'{A}/melissa_results/melissa_scores.csv', index=False); print('saved to', f'{A}/melissa_results')
 """
+
+# ---------- CELL M6: the warm core through time, with ERA5 as the reference and the overpass markers ----------
+# CPU is enough. Needs Drive mounted (A defined), the scenes unpacked (cell M1) and the analyses in $A/melissa_analysis.
+# Adds era5_warm_core_300_K and unet_warm_core_300_K to melissa_scores.csv and redraws melissa_summary.png.
+"""
+import glob, json, os
+import numpy as np, pandas as pd, xarray as xr
+import matplotlib.pyplot as plt
+
+def warm_core(t, radius_frac=0.375):
+    # same definition as physics/constraints.warm_core_anomaly (radius 48 px on the 128 grid): 5 x 5 centre minus the environment beyond the radius
+    H, W = t.shape
+    yy, xx = np.mgrid[:H, :W]
+    env = np.hypot(yy - H / 2, xx - W / 2) > radius_frac * H
+    core = np.nanmean(t[H // 2 - 2 : H // 2 + 3, W // 2 - 2 : W // 2 + 3])
+    return float(core - np.nanmean(t[env]))
+
+def to_grid(tt, shape):
+    if tt.shape == shape: return tt
+    fct = tt.shape[0] // shape[0]
+    return tt[: tt.shape[0] - tt.shape[0] % fct, : tt.shape[1] - tt.shape[1] % fct].reshape(shape[0], fct, shape[1], fct).mean((1, 3))
+
+rows = []
+for f in sorted(glob.glob(f'{A}/melissa_analysis/MELISSA_*_analysis.nc')):
+    ds = xr.load_dataset(f); sc = xr.load_dataset('/content/data/melissa/scenes/' + os.path.basename(f).replace('_analysis', ''))
+    lev = [int(v) for v in ds['level'].values]; k = lev.index(300)
+    t_a = ds['temperature'].values[k]; t_u = ds['temperature_unet'].values[k]
+    tt = to_grid(sc['temp'].values[k], t_a.shape) if 'temp' in sc else None
+    rows.append({'time': str(ds.attrs.get('time'))[:16],
+                 'analysis_wc': warm_core(t_a), 'unet_warm_core_300_K': warm_core(t_u),
+                 'era5_warm_core_300_K': warm_core(tt) if tt is not None else np.nan})
+    ds.close(); sc.close()
+W = pd.DataFrame(rows)
+
+S = pd.read_csv(f'{A}/melissa_results/melissa_scores.csv')
+for c in ['era5_warm_core_300_K', 'unet_warm_core_300_K']:
+    if c in S: S = S.drop(columns=c)
+S = S.merge(W[['time', 'era5_warm_core_300_K', 'unet_warm_core_300_K']], on='time', how='left')
+a = S[S.run == 'analysis'].copy()
+chk = float(np.abs(a.warm_core_300_K - W.set_index('time').loc[a.time, 'analysis_wc'].values).max())
+print('recomputed analysis warm core matches the saved one to %.3f K' % chk)
+pd.set_option('display.width', 220)
+print(a[['time', 'atms', 'era5_warm_core_300_K', 'warm_core_300_K', 'unet_warm_core_300_K', 'core_rmse_300_K']].round(2).to_string(index=False))
+on, off = a[a.atms == True], a[a.atms == False]
+print('\nmean 300 hPa warm core, sounder scenes vs infrared-only scenes:')
+print('  ERA5      %.2f vs %.2f K' % (on.era5_warm_core_300_K.mean(), off.era5_warm_core_300_K.mean()))
+print('  analysis  %.2f vs %.2f K' % (on.warm_core_300_K.mean(), off.warm_core_300_K.mean()))
+print('  U-Net     %.2f vs %.2f K' % (on.unet_warm_core_300_K.mean(), off.unet_warm_core_300_K.mean()))
+print('ERA5 peak warm core %.2f K at %s' % (a.era5_warm_core_300_K.max(), a.loc[a.era5_warm_core_300_K.idxmax(), 'time']))
+
+IB = 'https://www.ncei.noaa.gov/data/international-best-track-archive-for-climate-stewardship-ibtracs/v04r01/access/csv/ibtracs.NA.list.v04r01.csv'
+try:
+    ib = pd.read_csv(IB, skiprows=[1], low_memory=False)
+except Exception as e:
+    print('IBTrACS download failed, skipping the intensity panel:', e); ib = None
+t = pd.to_datetime(a.time)
+fig, ax = plt.subplots(1, 2, figsize=(13, 4.2))
+ax[0].plot(t, a.era5_warm_core_300_K, '--', color='gray', lw=1.6, label='ERA5 (reference)')
+ax[0].plot(t, a.warm_core_300_K, 'o-', color='navy', label='analysis')
+ax[0].plot(t, a.unet_warm_core_300_K, '-', color='tab:orange', lw=1.2, alpha=.9, label='direct U-Net proxy')
+ax[0].plot(t[a.atms == True], a.warm_core_300_K[a.atms == True], 'o', color='black', ms=9, mfc='none', mew=1.6, label='ATMS overpass')
+ax[0].set_ylabel('core minus environment at 300 hPa (K)'); ax[0].set_title('Melissa: the warm core through time')
+ax[0].grid(alpha=.3); ax[0].legend(loc='upper left'); ax[0].tick_params(axis='x', rotation=30)
+if ib is not None:
+    m = ib[(ib.NAME == 'MELISSA') & (ib.SEASON.astype(int) == 2025)].copy(); m['t'] = pd.to_datetime(m.ISO_TIME)
+    m = m[(m.t >= t.min()) & (m.t <= t.max())]
+    ax[1].plot(m.t, pd.to_numeric(m.USA_PRES, errors='coerce'), 'k-o', ms=3, label='IBTrACS min SLP (hPa)')
+    ax[1].set_title('Observed intensity'); ax[1].grid(alpha=.3); ax[1].legend(); ax[1].tick_params(axis='x', rotation=30)
+plt.tight_layout()
+plt.savefig(f'{A}/melissa_results/melissa_summary.png', dpi=140); plt.show()
+S.to_csv(f'{A}/melissa_results/melissa_scores.csv', index=False)
+a[['time', 'atms', 'era5_warm_core_300_K', 'warm_core_300_K', 'unet_warm_core_300_K', 'core_rmse_300_K', 'core_rmse_300_unet_K', 'domain_rmse_300_K', 'spread_core_300_K']].to_json(
+    f'{A}/melissa_results/melissa_warmcore.json', orient='records', indent=1)
+print('saved melissa_scores.csv (two new columns), melissa_summary.png and melissa_warmcore.json to', f'{A}/melissa_results')
+"""
