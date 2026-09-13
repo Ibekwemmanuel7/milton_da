@@ -1,5 +1,5 @@
 # data, weights and large artifacts stay out of the repository
-data/
+data/*/
 *.pt
 *.nc
 *.h5
@@ -26,3 +26,5 @@ __pycache__/
 docs/Tomorrow_io_*
 docs/Milton_DA_Interview_Deck.*
 
+!data/__pycache__/
+data/__pycache__/
