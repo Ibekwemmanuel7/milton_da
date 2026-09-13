@@ -9,9 +9,12 @@ C  : generic channel axis
 H, W : rows / cols of the storm-centred *target* grid (IR native resolution)
 h, w : rows / cols of the coarse microwave grid, h = H // mw_downscale
 
-State vector x  : [B, L + 1, H, W]
+State vector x  : [B, L + 1 (+ ice), H, W]
                   channels 0..L-1  = temperature at PRESSURE_LEVELS_HPA (K, normalised)
                   channel  L       = surface precipitation rate (log1p(mm/h), normalised)
+                  DataConfig.ice = "iwp":     channel L+1 = ice water path (log1p(kg m-2), normalised)
+                  DataConfig.ice = "profile": channels L+1 .. 2L = cloud ice water content per level
+                                              (log1p(g kg-1), normalised); IWP is its pressure integral
 IR observations : [B, C_ir, H, W]   brightness temperature (K, normalised)
 MW observations : [B, C_mw, h, w]   brightness temperature (K, normalised)
 """
@@ -62,14 +65,21 @@ class DataConfig:
     mw_time_tolerance_min: float = 90.0     # polar orbiter revisit
     precip_log_transform: bool = True
     stats_path: str = "artifacts/norm_stats.json"
+    # Cloud ice in the state (needs scenes built with ERA5 specific_cloud_ice_water_content, or patched
+    # with scripts/add_cloud_ice.py). "none" keeps the original L+1 state so old checkpoints load unchanged.
+    ice: str = "none"                       # "none" | "iwp" | "profile"
 
     @property
     def n_levels(self) -> int:
         return len(self.levels_hpa)
 
     @property
+    def ice_channels(self) -> int:
+        return {"none": 0, "iwp": 1, "profile": self.n_levels}[self.ice]
+
+    @property
     def state_channels(self) -> int:
-        return self.n_levels + 1
+        return self.n_levels + 1 + self.ice_channels
 
 
 @dataclass
@@ -127,6 +137,12 @@ class GuidanceConfig:
     max_step_rms: float = 0.25        # cap on per-step RMS guidance displacement (normalised units)
     x0_clip: float = 6.0              # soft clamp of the Tweedie estimate (normalised units)
     ensemble_size: int = 8
+    # All-sky observation error (Geer and Bauer 2011): instead of dropping cloud-affected channels, the
+    # per-pixel error grows with a symmetric cloud predictor c = 0.5 (c_obs + c_model), where c is the
+    # scattering / cloud depression below the clear-sky simulation. sigma_eff^2 = sigma^2 + (slope c)^2.
+    allsky: bool = False
+    allsky_slope: float = 0.5         # K of extra error per K of symmetric cloud depression
+    allsky_max_sigma_K: float = 40.0  # cap on sigma_eff
 
 
 @dataclass

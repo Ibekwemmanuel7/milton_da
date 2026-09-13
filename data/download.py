@@ -385,12 +385,19 @@ def download_imerg(times: Sequence, out_dir: str, short_name: str = "GPM_3IMERGH
 # ==============================================================================================
 # ERA5 (Copernicus CDS)
 # ==============================================================================================
-def era5_request(day: datetime, hours: Sequence[int], levels_hpa: Sequence[int], area: Sequence[float]) -> Dict:
-    """CDS request body for one day. area = [north, west, south, east] in degrees."""
+# Cloud ice is requested on the state levels plus these levels above the state top (ERA5 has them), so the
+# ice water path integrates the anvil ice that sits above 200 hPa in deep convection.
+ERA5_ICE_EXTRA_LEVELS_HPA = [100, 125, 150, 175]
+
+
+def era5_request(day: datetime, hours: Sequence[int], levels_hpa: Sequence[int], area: Sequence[float], cloud_ice: bool = True) -> Dict:
+    """CDS request body for one day. area = [north, west, south, east] in degrees. With cloud_ice, the
+    request also carries specific_cloud_ice_water_content (ciwc) and the extra upper levels."""
+    levels = sorted(set(int(p) for p in levels_hpa) | (set(ERA5_ICE_EXTRA_LEVELS_HPA) if cloud_ice else set()))
     return {
         "product_type": ["reanalysis"],
-        "variable": ["temperature"],
-        "pressure_level": [str(p) for p in levels_hpa],
+        "variable": ["temperature"] + (["specific_cloud_ice_water_content"] if cloud_ice else []),
+        "pressure_level": [str(p) for p in levels],
         "year": [f"{day.year}"],
         "month": [f"{day.month:02d}"],
         "day": [f"{day.day:02d}"],
@@ -401,8 +408,10 @@ def era5_request(day: datetime, hours: Sequence[int], levels_hpa: Sequence[int],
     }
 
 
-def download_era5(times: Sequence, levels_hpa: Sequence[int], area: Sequence[float], out_dir: str, tag: str = "storm") -> Dict[str, str]:
-    """One CDS request per UTC day covering all requested hours. Returns {YYYY-MM-DD: path}."""
+def download_era5(times: Sequence, levels_hpa: Sequence[int], area: Sequence[float], out_dir: str, tag: str = "storm", cloud_ice: bool = True) -> Dict[str, str]:
+    """One CDS request per UTC day covering all requested hours. Returns {YYYY-MM-DD: path}.
+    Files written before cloud ice was added (temperature only) are reused as they are; the scene builder
+    simply gets no ice for those days (patch them with scripts/add_cloud_ice.py)."""
     import cdsapi
 
     os.makedirs(out_dir, exist_ok=True)
@@ -417,7 +426,7 @@ def download_era5(times: Sequence, levels_hpa: Sequence[int], area: Sequence[flo
         if not os.path.exists(dst):
             d = datetime.strptime(day, "%Y-%m-%d")
             log.info(f"ERA5 request {day} hours {sorted(set(hours))}")
-            _retry(lambda: client.retrieve("reanalysis-era5-pressure-levels", era5_request(d, hours, levels_hpa, area), dst), f"ERA5 {day}", attempts=4, base_delay=30.0)
+            _retry(lambda: client.retrieve("reanalysis-era5-pressure-levels", era5_request(d, hours, levels_hpa, area, cloud_ice=cloud_ice), dst), f"ERA5 {day}", attempts=4, base_delay=30.0)
         out[day] = dst
     return out
 

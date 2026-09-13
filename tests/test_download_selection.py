@@ -57,8 +57,11 @@ def test_imerg_and_era5_and_area():
     t = datetime(2024, 10, 7, 12, 10, tzinfo=UTC)
     g = [Granule("GPM_3IMERGHH", t.replace(minute=0), t.replace(minute=29, second=59), "u1", "a"), Granule("GPM_3IMERGHH", t.replace(minute=30), t.replace(minute=59), "u2", "b")]
     assert select_imerg(g, t).name == "a"
-    req = era5_request(datetime(2024, 10, 7), [0, 6, 6, 12], [200, 500, 1000], [30, -100, 15, -80])
+    req = era5_request(datetime(2024, 10, 7), [0, 6, 6, 12], [200, 500, 1000], [30, -100, 15, -80], cloud_ice=False)
     assert req["time"] == ["00:00", "06:00", "12:00"] and req["pressure_level"] == ["200", "500", "1000"] and req["day"] == ["07"]
+    req = era5_request(datetime(2024, 10, 7), [0], [200, 500, 1000], [30, -100, 15, -80])
+    assert req["variable"] == ["temperature", "specific_cloud_ice_water_content"]
+    assert req["pressure_level"] == ["100", "125", "150", "175", "200", "500", "1000"]
     assert storm_area([20, 25], [-95, -85], 4) == [29.0, -99.0, 16.0, -81.0]
 
 

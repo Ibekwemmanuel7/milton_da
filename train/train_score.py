@@ -26,7 +26,7 @@ from .common import EMA, MeterLogger, get_device, load_checkpoint, save_checkpoi
 log = logging.getLogger("milton_da")
 
 
-def train_score(cfg: PipelineConfig, train_ds: Dataset, max_steps: Optional[int] = None, device=None, model: Optional[ScoreUNet] = None, resume: bool = False, ckpt_every: int = 500) -> tuple[ScoreUNet, EMA]:
+def train_score(cfg: PipelineConfig, train_ds: Dataset, max_steps: Optional[int] = None, device=None, model: Optional[ScoreUNet] = None, resume: bool = False, ckpt_every: int = 500, ckpt_name: str = "score.pt") -> tuple[ScoreUNet, EMA]:
     """Train the prior. With resume=True an existing <ckpt_dir>/score.pt (model, optimiser, EMA, step)
     is loaded and training continues from its step, so a long CPU run can be interrupted and restarted."""
     device = device or get_device()
@@ -41,7 +41,7 @@ def train_score(cfg: PipelineConfig, train_ds: Dataset, max_steps: Optional[int]
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / warmup))
     scaler = torch.amp.GradScaler(enabled=tc.amp and device.type == "cuda")
     meter, step = MeterLogger(tc.log_every), 0
-    ckpt_path = os.path.join(tc.ckpt_dir, "score.pt")
+    ckpt_path = os.path.join(tc.ckpt_dir, ckpt_name)
     if resume and os.path.exists(ckpt_path):
         step = load_checkpoint(ckpt_path, model, opt, ema, map_location=device)
         import warnings
@@ -68,7 +68,7 @@ def train_score(cfg: PipelineConfig, train_ds: Dataset, max_steps: Optional[int]
             step += 1
             meter.maybe_log(step)
             if step % ckpt_every == 0 or step == total:
-                save_checkpoint(ckpt_path, model, opt, ema, step=step)
+                save_checkpoint(ckpt_path, model, opt, ema, step=step, extra={"ice": cfg.data.ice, "state_channels": cfg.data.state_channels})
             if step >= total:
                 break
     return model, ema
@@ -86,7 +86,7 @@ def train_rtm_residual(cfg: PipelineConfig, train_ds: Dataset, hybrid_rtm, norm,
         for batch in loader:
             batch = {k: v.to(device) for k, v in batch.items()}
             temp, precip = norm.state_to_physical(batch["state"], cfg.data.precip_log_transform)
-            ir_sim, mw_sim = hybrid_rtm(temp, precip)
+            ir_sim, mw_sim = hybrid_rtm(temp, precip, norm.state_ice(batch["state"], cfg.data.levels_hpa))
             l_ir = (((ir_sim - batch["ir_raw"]) ** 2) * batch["ir_mask"]).sum() / (batch["ir_mask"].sum() * ir_sim.shape[1]).clamp(min=1)
             l_mw = (((mw_sim - batch["mw_raw"]) ** 2) * batch["mw_mask"]).sum() / (batch["mw_mask"].sum() * mw_sim.shape[1]).clamp(min=1)
             loss = l_ir + l_mw

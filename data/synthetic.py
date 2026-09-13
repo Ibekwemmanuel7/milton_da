@@ -60,10 +60,17 @@ def make_synthetic_scene(cfg: DataConfig, seed: int = 0, center_lat: float = 22.
     precip = (eyewall + bands) * (1.0 + 0.3 * rng.normal(size=(H, W))).clip(0, None)
     precip = precip.astype(np.float32).clip(0, 80)
 
+    # --- cloud ice: an anvil over the eyewall and bands, peaking near 300 hPa -------------
+    ice_shape = np.exp(-0.5 * ((lnp - np.log(300.0)) / 0.35) ** 2); ice_shape /= ice_shape.sum()      # [L], fraction of IWP per level
+    iwp = (0.08 * precip * (1.0 + 0.5 * np.exp(-0.5 * (r / (2.0 * rmw)) ** 2))).astype(np.float32)     # kg m-2, ~2.4 at 30 mm/h
+    p_pa = np.asarray(cfg.levels_hpa, np.float64) * 100.0
+    dp = np.concatenate([[p_pa[1] - p_pa[0]], p_pa[1:] - p_pa[:-1]])
+    ciwc = (iwp[None] * ice_shape[:, None, None] * 9.80665 / dp[:, None, None]).astype(np.float32)   # kg kg-1
+
     # --- observations from the forward operator + noise ---------------------------------
     rtm = AnalyticRTM(cfg.levels_hpa, cfg.ir_channels, cfg.mw_channels, g.mw_downscale)
     with torch.no_grad():
-        ir_tb, mw_tb = rtm(torch.from_numpy(temp)[None], torch.from_numpy(precip)[None, None])
+        ir_tb, mw_tb = rtm(torch.from_numpy(temp)[None], torch.from_numpy(precip)[None, None], {"iwp": torch.from_numpy(iwp)[None, None]})
     ir = ir_tb[0].numpy() + rng.normal(0, 1.0, ir_tb[0].shape).astype(np.float32)
     mw = mw_tb[0].numpy() + rng.normal(0, 0.7, mw_tb[0].shape).astype(np.float32)
 
@@ -82,6 +89,7 @@ def make_synthetic_scene(cfg: DataConfig, seed: int = 0, center_lat: float = 22.
             "mw_mask": (("yc", "xc"), mw_mask),
             "temp": (("level", "y", "x"), temp.astype(np.float32)),
             "precip": (("y", "x"), precip),
+            "ciwc": (("level", "y", "x"), ciwc), "iwp": (("y", "x"), iwp),
             "lat": (("y", "x"), target.lat2d), "lon": (("y", "x"), target.lon2d),
             "latc": (("yc", "xc"), coarse.lat2d), "lonc": (("yc", "xc"), coarse.lon2d),
         },

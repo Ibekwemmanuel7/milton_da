@@ -116,6 +116,8 @@ def main(argv=None) -> int:
     ap.add_argument("--graph-k", type=int, default=None)
     ap.add_argument("--graph-rounds", type=int, default=None)
     ap.add_argument("--seed", type=int, default=None, help="torch/numpy seed for a reproducible run")
+    ap.add_argument("--ice", choices=["none", "iwp", "profile"], default="none", help="cloud ice in the state (scenes need 'iwp' / 'ciwc'; see scripts/add_cloud_ice.py). Changes the state size: train both networks and use a new --out or new checkpoint names")
+    ap.add_argument("--score-ckpt-name", default="score.pt", help="checkpoint file name for the diffusion prior")
     args = ap.parse_args(argv)
     if args.seed is not None:
         torch.manual_seed(args.seed); np.random.seed(args.seed)
@@ -142,6 +144,9 @@ def main(argv=None) -> int:
         cfg.unet.graph_k = args.graph_k
     if args.graph_rounds is not None:
         cfg.unet.graph_rounds = args.graph_rounds
+    cfg.data.ice = args.ice
+    if args.ice != "none":
+        log.info(f"state carries cloud ice ({args.ice}); state channels = {cfg.data.state_channels}")
     log.info(f"U-Net variant: pos_embed={cfg.unet.pos_embed} self_attn_levels={tuple(cfg.unet.self_attn_levels)} mw_encoder={cfg.unet.mw_encoder} (k={cfg.unet.graph_k}, rounds={cfg.unet.graph_rounds}) -> checkpoints/{args.unet_ckpt_name}")
     device = get_device()
     log.info(f"device {device}; preset {args.preset}; downscale {args.downscale}")
@@ -161,6 +166,8 @@ def main(argv=None) -> int:
         norm = Normalizer.fit_paths(train_paths)
         norm.save(stats_path)
     log.info(f"normaliser -> {stats_path}")
+    if args.ice != "none" and {"iwp": "iwp", "profile": "ciwc"}[args.ice] not in norm.stats:
+        log.error(f"--ice {args.ice} needs '{ {'iwp': 'iwp', 'profile': 'ciwc'}[args.ice] }' statistics in {stats_path}; refit the normaliser on scenes that carry cloud ice (delete the file or use a new --out)"); return 1
 
     d = cfg.data
     train_ds = HurricaneSceneDataset(train_paths, d, norm, augment=True, downscale=args.downscale)
@@ -170,7 +177,7 @@ def main(argv=None) -> int:
     sample_shape = train_ds[0]["state"].shape
     if args.sample_only:
         from ..models.score_net import ScoreUNet
-        ckpt = torch.load(os.path.join(cfg.train.ckpt_dir, "score.pt"), map_location="cpu")
+        ckpt = torch.load(os.path.join(cfg.train.ckpt_dir, args.score_ckpt_name), map_location="cpu")
         net = ScoreUNet(cfg.data, cfg.score)
         net.load_state_dict(ckpt.get("ema", ckpt["model"]))
         log.info(f"sampling the prior from step {ckpt.get('step', '?')} checkpoint")
@@ -181,7 +188,7 @@ def main(argv=None) -> int:
         train_unet(cfg, train_ds, val_ds, norm, rtm, max_steps=args.unet_steps, device=device, ckpt_name=args.unet_ckpt_name)
     if not args.skip_score:
         log.info(f"stage 2: diffusion prior for {args.score_steps} steps")
-        model, ema = train_score(cfg, train_ds, max_steps=args.score_steps, device=device, resume=args.resume)
+        model, ema = train_score(cfg, train_ds, max_steps=args.score_steps, device=device, resume=args.resume, ckpt_name=args.score_ckpt_name)
         sample_prior(ema.shadow, cfg, norm, sample_shape, os.path.join(args.out, "prior_samples.png"), device=device)
     return 0
 

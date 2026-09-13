@@ -33,13 +33,14 @@ def unet_loss(model: CrossAttentionUNet, batch: Dict[str, torch.Tensor], norm: N
     x_det = model(batch["ir"], batch["ir_mask"], batch["mw"], batch["mw_mask"], batch.get("mw_zen"))       # [B, L+1, H, W]
     target = batch["state"]
     L = model.n_levels
-    w = torch.ones(L + 1, device=x_det.device)
+    w = torch.ones(x_det.shape[1], device=x_det.device)
     w[L] = 3.0                                                                          # precip channel weight
+    w[L + 1 :] = 2.0                                                                    # ice channels (if any)
     mse = (((x_det - target) ** 2).mean(dim=(0, 2, 3)) * w).sum() / w.sum()
     out = {"mse": mse}
     if rtm is not None and cfg.train.lambda_rtm_consistency > 0:
         temp, precip = norm.state_to_physical(x_det, cfg.data.precip_log_transform)
-        ir_sim, mw_sim = rtm(temp, precip)
+        ir_sim, mw_sim = rtm(temp, precip, norm.state_ice(x_det, cfg.data.levels_hpa))
         ir_err = (((ir_sim - batch["ir_raw"]) ** 2) * batch["ir_mask"]).sum() / (batch["ir_mask"].sum() * ir_sim.shape[1]).clamp(min=1)
         mw_err = (((mw_sim - batch["mw_raw"]) ** 2) * batch["mw_mask"]).sum() / (batch["mw_mask"].sum() * mw_sim.shape[1]).clamp(min=1)
         rtm_term = (ir_err / cfg.guidance.sigma_ir_K**2 + mw_err / cfg.guidance.sigma_mw_K**2) * 0.5
@@ -76,7 +77,7 @@ def train_unet(cfg: PipelineConfig, train_ds: Dataset, val_ds: Optional[Dataset]
             step += 1
             meter.maybe_log(step)
             if step % 1000 == 0 or step == total:
-                save_checkpoint(os.path.join(tc.ckpt_dir, ckpt_name), model, opt, step=step, extra={"unet_cfg": asdict(cfg.unet)})
+                save_checkpoint(os.path.join(tc.ckpt_dir, ckpt_name), model, opt, step=step, extra={"unet_cfg": asdict(cfg.unet), "ice": cfg.data.ice})
                 if val_ds is not None:
                     log.info(f"val {validate_unet(model, val_ds, norm, rtm, cfg, device)}")
             if step >= total:

@@ -14,6 +14,8 @@ Every scene Dataset has:
     mw_zenith (yc, xc)              degree     satellite zenith angle (limb geometry), mw_landfrac (yc, xc)
     temp    (level, y, x)           K          ERA5 temperature on pressure levels (target labels)
     precip  (y, x)                  mm h-1     IMERG surface precipitation rate (target labels)
+    ciwc    (level, y, x)           kg kg-1    ERA5 specific cloud ice water content (when requested)
+    iwp     (y, x)                  kg m-2     ice water path, pressure integral of ciwc over all ERA5 levels in the file
     lat/lon (y, x), latc/lonc (yc, xc)
     attrs: time, storm_lat, storm_lon, storm_name
 
@@ -78,6 +80,10 @@ class Normalizer:
             acc["temp"].append(s["temp"].values.reshape(s.sizes["level"], -1))
             p = s["precip"].values.reshape(1, -1)
             acc["precip"].append(np.log1p(np.clip(p, 0, None)) if log_precip else p)
+            if "iwp" in s:
+                acc.setdefault("iwp", []).append(ice_transform(s["iwp"].values.reshape(1, -1), "iwp"))
+            if "ciwc" in s:
+                acc.setdefault("ciwc", []).append(ice_transform(s["ciwc"].values.reshape(s.sizes["level"], -1), "ciwc"))
         stats = {}
         for k, chunks in acc.items():
             a = np.concatenate(chunks, axis=1)
@@ -101,6 +107,10 @@ class Normalizer:
                     chunks["mw"] = s["mw"].values[:, mwm].reshape(s.sizes["mw_channel"], -1)
                 pr = s["precip"].values.reshape(1, -1)
                 chunks["precip"] = np.log1p(np.clip(pr, 0, None)) if log_precip else pr
+                if "iwp" in s:
+                    chunks["iwp"] = ice_transform(s["iwp"].values.reshape(1, -1), "iwp")
+                if "ciwc" in s:
+                    chunks["ciwc"] = ice_transform(s["ciwc"].values.reshape(s.sizes["level"], -1), "ciwc")
             for k, a in chunks.items():
                 a = a.astype(np.float64)
                 sums[k] = sums.get(k, 0) + a.sum(1)
@@ -128,19 +138,73 @@ class Normalizer:
         return x * s + m
 
     # -- state vector helpers ------------------------------------------------------------------
+    @property
+    def n_levels(self) -> int:
+        return len(self.stats["temp"]["mean"])
+
     def state_to_physical(self, state: torch.Tensor, log_precip: bool = True):
-        """state [B, L+1, H, W] (normalised) -> temp [B, L, H, W] K, precip [B, 1, H, W] mm/h.
-        Differentiable; used inside the RTM likelihood."""
-        L = state.shape[1] - 1
+        """state [B, L+1(+ice), H, W] (normalised) -> temp [B, L, H, W] K, precip [B, 1, H, W] mm/h.
+        Differentiable; used inside the RTM likelihood. Ice channels (if any) are read with state_ice()."""
+        L = self.n_levels
         temp = self.denormalize("temp", state[:, :L])
-        p = self.denormalize("precip", state[:, L:])
+        p = self.denormalize("precip", state[:, L : L + 1])
         if log_precip:
             p = torch.expm1(p.clamp(max=12.0))
         return temp, p.clamp(min=0.0)
 
-    def physical_to_state(self, temp: torch.Tensor, precip: torch.Tensor, log_precip: bool = True) -> torch.Tensor:
+    def state_ice(self, state: torch.Tensor, levels_hpa: Optional[Sequence[float]] = None) -> Optional[Dict[str, torch.Tensor]]:
+        """Ice channels of the state in physical units, or None when the state carries no ice.
+        Returns {"iwp": [B,1,H,W] kg m-2} for an IWP state, or {"ciwc": [B,L,H,W] kg kg-1, "iwp": [B,1,H,W]}
+        for a profile state (IWP integrated over the state levels with the hydrostatic dp/g)."""
+        L = self.n_levels
+        n_ice = state.shape[1] - L - 1
+        if n_ice <= 0:
+            return None
+        if n_ice == 1:
+            iwp = ice_inverse(self.denormalize("iwp", state[:, L + 1 : L + 2]), "iwp")
+            return {"iwp": iwp}
+        if n_ice != L:
+            raise ValueError(f"state has {n_ice} ice channels; expected 1 (iwp) or {L} (profile)")
+        ciwc = ice_inverse(self.denormalize("ciwc", state[:, L + 1 :]), "ciwc")
+        return {"ciwc": ciwc, "iwp": integrate_ice(ciwc, levels_hpa)}
+
+    def physical_to_state(self, temp: torch.Tensor, precip: torch.Tensor, log_precip: bool = True, ice: Optional[Dict[str, torch.Tensor]] = None,
+                          ice_mode: str = "none") -> torch.Tensor:
         p = torch.log1p(precip.clamp(min=0)) if log_precip else precip
-        return torch.cat([self.normalize("temp", temp), self.normalize("precip", p)], dim=1)
+        parts = [self.normalize("temp", temp), self.normalize("precip", p)]
+        if ice_mode == "iwp":
+            parts.append(self.normalize("iwp", ice_transform(ice["iwp"], "iwp")))
+        elif ice_mode == "profile":
+            parts.append(self.normalize("ciwc", ice_transform(ice["ciwc"], "ciwc")))
+        elif ice_mode != "none":
+            raise ValueError(ice_mode)
+        return torch.cat(parts, dim=1)
+
+
+# -- cloud-ice transforms (shared by numpy and torch) ------------------------------------------
+ICE_SCALE = {"iwp": 1.0, "ciwc": 1000.0}        # iwp kg m-2 -> log1p(kg m-2); ciwc kg kg-1 -> log1p(g kg-1)
+
+
+def ice_transform(x, key: str):
+    """Physical ice quantity -> compressed variable stored in the state (log1p of a scaled, non-negative value)."""
+    sc = ICE_SCALE[key]
+    if isinstance(x, torch.Tensor):
+        return torch.log1p(x.clamp(min=0) * sc)
+    return np.log1p(np.clip(np.nan_to_num(x, nan=0.0), 0, None) * sc)
+
+
+def ice_inverse(x: torch.Tensor, key: str) -> torch.Tensor:
+    return (torch.expm1(x.clamp(max=12.0)) / ICE_SCALE[key]).clamp(min=0.0)
+
+
+def integrate_ice(ciwc: torch.Tensor, levels_hpa: Optional[Sequence[float]] = None) -> torch.Tensor:
+    """ciwc [B,L,H,W] (kg kg-1) on pressure levels (top -> bottom) -> ice water path [B,1,H,W] (kg m-2),
+    IWP = sum over layers of mean(q) dp / g (trapezoid in pressure)."""
+    from ..config import PRESSURE_LEVELS_HPA
+    p = torch.tensor(list(levels_hpa or PRESSURE_LEVELS_HPA), dtype=ciwc.dtype, device=ciwc.device) * 100.0   # Pa
+    dp = (p[1:] - p[:-1]).view(1, -1, 1, 1)
+    q_mid = 0.5 * (ciwc[:, 1:] + ciwc[:, :-1])
+    return (q_mid * dp).sum(1, keepdim=True) / 9.80665
 
 
 # ----------------------------------------------------------------------------------------------
@@ -194,6 +258,26 @@ def _open_atms(paths: Sequence[str], channels: Sequence[int], limb_correct: bool
     return lat, lon, tb_sel, zen, land
 
 
+def cloud_ice_from_era5(eds: xr.Dataset, time, levels_hpa: List[int], target: "TargetGrid"):
+    """ERA5 pressure-level file with 'ciwc' -> (ciwc [L,H,W] on the state levels, iwp [H,W] kg m-2).
+    The IWP integrates every level in the file (the request adds 100 to 175 hPa above the state top, where
+    deep-convective anvils still carry ice), by the trapezoid rule in pressure: sum mean(q) dp / g."""
+    lvl_name = "pressure_level" if "pressure_level" in eds.dims else "level"
+    q = eds["ciwc"]
+    if "valid_time" in q.dims or "time" in q.dims:
+        tname = "valid_time" if "valid_time" in q.dims else "time"
+        q = q.sel({tname: time}, method="nearest")
+    q = q.sortby(lvl_name)                                                  # ascending pressure: top -> bottom
+    p_all = q[lvl_name].values.astype(np.float64) * 100.0                  # Pa
+    q_all = np.nan_to_num(q.values, nan=0.0).clip(0, None)                  # [Lall, ny, nx]
+    q_mid = 0.5 * (q_all[1:] + q_all[:-1])
+    iwp_native = (q_mid * (p_all[1:] - p_all[:-1])[:, None, None]).sum(0) / 9.80665
+    iwp_da = xr.DataArray(iwp_native, coords={d: q[d] for d in q.dims if d != lvl_name}, dims=[d for d in q.dims if d != lvl_name])
+    ciwc = regrid_latlon_to_target(q.sel({lvl_name: levels_hpa}), target).astype(np.float32)
+    iwp = np.clip(np.nan_to_num(regrid_latlon_to_target(iwp_da, target), nan=0.0), 0, None).astype(np.float32)
+    return np.clip(np.nan_to_num(ciwc, nan=0.0), 0, None), iwp
+
+
 def build_scene(paths: RawScenePaths, cfg: DataConfig) -> xr.Dataset:
     """Co-register all sources for one analysis time into a single xarray.Dataset."""
     g = cfg.grid
@@ -237,6 +321,9 @@ def build_scene(paths: RawScenePaths, cfg: DataConfig) -> xr.Dataset:
             tname = "valid_time" if "valid_time" in t.dims else "time"
             t = t.sel({tname: paths.time}, method="nearest")
         temp = regrid_latlon_to_target(t, target)                     # [L, H, W]
+        ciwc, iwp = None, None
+        if "ciwc" in eds:
+            ciwc, iwp = cloud_ice_from_era5(eds, paths.time, list(cfg.levels_hpa), target)
     with xr.open_dataset(paths.imerg_file, group="Grid") as ids:
         p = ids["precipitation"] if "precipitation" in ids else ids["precipitationCal"]
         p = p.isel(time=0) if "time" in p.dims else p
@@ -254,6 +341,8 @@ def build_scene(paths: RawScenePaths, cfg: DataConfig) -> xr.Dataset:
             "mw_landfrac": (("yc", "xc"), mw_land, {"long_name": "ATMS footprint land fraction"}),
             "temp": (("level", "y", "x"), temp, {"units": "K", "long_name": "ERA5 temperature"}),
             "precip": (("y", "x"), precip, {"units": "mm h-1", "long_name": "IMERG precipitation rate"}),
+            **({"ciwc": (("level", "y", "x"), ciwc, {"units": "kg kg-1", "long_name": "ERA5 specific cloud ice water content"}),
+                "iwp": (("y", "x"), iwp, {"units": "kg m-2", "long_name": "ERA5 ice water path (integral of ciwc over all requested levels)"})} if ciwc is not None else {}),
             "lat": (("y", "x"), target.lat2d), "lon": (("y", "x"), target.lon2d),
             "latc": (("yc", "xc"), coarse.lat2d), "lonc": (("yc", "xc"), coarse.lon2d),
         },
@@ -310,7 +399,16 @@ class HurricaneSceneDataset(Dataset):
 
         ir = self.norm.normalize("ir", ir_raw) * ir_mask                      # masked -> 0 after normalisation
         mw = self.norm.normalize("mw", mw_raw) * mw_mask
-        state = self.norm.physical_to_state(temp[None], precip[None], self.cfg.precip_log_transform)[0]   # [L+1, H, W]
+        ice = None
+        if self.cfg.ice == "iwp":
+            if "iwp" not in s:
+                raise KeyError(f"DataConfig.ice='iwp' but the scene has no 'iwp' variable; rebuild it with ERA5 ciwc or run scripts/add_cloud_ice.py")
+            ice = {"iwp": torch.from_numpy(s["iwp"].values).float()[None][None]}                   # [1, 1, H, W]
+        elif self.cfg.ice == "profile":
+            if "ciwc" not in s:
+                raise KeyError(f"DataConfig.ice='profile' but the scene has no 'ciwc' variable; rebuild it with ERA5 ciwc or run scripts/add_cloud_ice.py")
+            ice = {"ciwc": torch.from_numpy(s["ciwc"].values).float()[None]}                       # [1, L, H, W]
+        state = self.norm.physical_to_state(temp[None], precip[None], self.cfg.precip_log_transform, ice=ice, ice_mode=self.cfg.ice)[0]   # [L+1(+ice), H, W]
 
         sample = {"ir": ir, "ir_mask": ir_mask, "mw": mw, "mw_mask": mw_mask, "mw_zen": mw_zen * mw_mask, "state": state, "ir_raw": ir_raw, "mw_raw": mw_raw}
         if self.downscale > 1:

@@ -62,10 +62,13 @@ class RetrievalEngine:
         self.sampler = GuidedScoreSampler(self.score_net, VPSDE(cfg.sde), self.likelihood, cfg.guidance)
 
     @classmethod
-    def from_checkpoints(cls, cfg: PipelineConfig, stats_path: str, unet_ckpt: str, score_ckpt: str, device=None) -> "RetrievalEngine":
+    def from_checkpoints(cls, cfg: PipelineConfig, stats_path: str, unet_ckpt: str, score_ckpt: str, device=None, rtm_kind: str = "analytic") -> "RetrievalEngine":
         norm = Normalizer.load(stats_path)
         # a checkpoint trained as an attention-encoder variant records its U-Net config; honour it
-        uc = torch.load(unet_ckpt, map_location="cpu").get("extra", {}).get("unet_cfg")
+        extra = torch.load(unet_ckpt, map_location="cpu").get("extra", {})
+        uc = extra.get("unet_cfg")
+        if extra.get("ice") and cfg.data.ice == "none":
+            cfg.data.ice = extra["ice"]                     # checkpoint trained with ice in the state
         if uc:
             cfg.unet.pos_embed = bool(uc.get("pos_embed", False))
             cfg.unet.self_attn_levels = tuple(uc.get("self_attn_levels", ()))
@@ -77,7 +80,12 @@ class RetrievalEngine:
         score = ScoreUNet(cfg.data, cfg.score)
         ckpt = torch.load(score_ckpt, map_location="cpu")
         score.load_state_dict(ckpt.get("ema", ckpt["model"]))     # prefer EMA weights
-        return cls(cfg, norm, unet, score, device=device)
+        d = cfg.data
+        rtm = None
+        if rtm_kind == "scattering":
+            from ..physics.scatter import ScatteringRTM
+            rtm = ScatteringRTM(d.levels_hpa, d.ir_channels, d.mw_channels, d.grid.mw_downscale)
+        return cls(cfg, norm, unet, score, rtm=rtm, device=device)
 
     @torch.no_grad()
     def proxy(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -102,7 +110,8 @@ class RetrievalEngine:
             t_mean, p_mean = t_mem.mean(0), p_mem.mean(0)
             t_std, p_std = t_mem.std(0), p_mem.std(0)
             t_det, p_det = self.norm.state_to_physical(obs.x_det[:1], d.precip_log_transform)
-            ir_sim, mw_sim = self.rtm(t_mean[None], p_mean[None])
+            ice_mean = self.norm.state_ice(out.mean[:1], d.levels_hpa)
+            ir_sim, mw_sim = self.rtm(t_mean[None], p_mean[None], ice_mean)
             thick = hydrostatic_thickness(t_mean[None], d.levels_hpa)[0]
             wc = warm_core_anomaly(t_mean[None])[0]
         ds = xr.Dataset(
@@ -124,6 +133,12 @@ class RetrievalEngine:
             coords={"level": list(d.levels_hpa), "layer": np.arange(d.n_levels - 1), "ir_channel": list(d.ir_channels), "mw_channel": list(d.mw_channels)},
             attrs={**scene.attrs, "ensemble_size": int(out.samples.shape[0]), "n_steps": self.cfg.guidance.n_steps},
         )
+        if ice_mean is not None:
+            ds["iwp"] = (("y", "x"), ice_mean["iwp"][0, 0].cpu().numpy(), {"units": "kg m-2", "long_name": "analysis ensemble mean ice water path"})
+            ice_det = self.norm.state_ice(obs.x_det[:1], d.levels_hpa)
+            ds["iwp_unet"] = (("y", "x"), ice_det["iwp"][0, 0].cpu().numpy(), {"units": "kg m-2"})
+            if "ciwc" in ice_mean:
+                ds["ciwc"] = (("level", "y", "x"), ice_mean["ciwc"][0].cpu().numpy(), {"units": "kg kg-1", "long_name": "analysis ensemble mean cloud ice water content"})
         if truth is not None:
             t_true, p_true = self.norm.state_to_physical(truth[:1].to(self.device), d.precip_log_transform)
             ds["temperature_rmse_vs_era5"] = (("level",), torch.sqrt(((t_mean - t_true[0]) ** 2).mean((-2, -1))).cpu().numpy())
@@ -150,6 +165,11 @@ def main() -> None:
     ap.add_argument("--audit-table", default="archive_2023", help="which table in the audit file to calibrate from")
     ap.add_argument("--ir-channels", nargs="*", default=[], help="IR channels kept in the physical likelihood (default none: the U-Net carries the IR)")
     ap.add_argument("--mw-channels", nargs="*", default=["5", "6", "7", "8", "9"], help="ATMS channels kept in the physical likelihood (default: O2 sounding channels)")
+    ap.add_argument("--ice", choices=["none", "iwp", "profile"], default=None, help="ice in the state; default: what the U-Net checkpoint was trained with")
+    ap.add_argument("--rtm", choices=["analytic", "scattering"], default="analytic", help="scattering = two-stream ice scattering on the microwave channels (physics/scatter.py)")
+    ap.add_argument("--scatter-fit", default=None, help="JSON with the per-channel ice-scattering fit from the audit ({channel: {a_K, I0, bias_K, rmse_K}}), or a table name inside --rtm-audit")
+    ap.add_argument("--allsky", action="store_true", help="all-sky observation error: downweight cloud-affected pixels with the symmetric cloud predictor instead of dropping channels")
+    ap.add_argument("--allsky-slope", type=float, default=None, help="K of extra error per K of symmetric cloud depression (default 0.5)")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
@@ -163,7 +183,17 @@ def main() -> None:
         cfg.guidance.sigma_unet = args.sigma_unet
     if args.no_rtm:
         cfg.guidance.sigma_ir_K, cfg.guidance.sigma_mw_K = 1e6, 1e6
-    engine = RetrievalEngine.from_checkpoints(cfg, args.stats, args.unet, args.score)
+    cfg.guidance.allsky = bool(args.allsky)
+    if args.allsky_slope is not None:
+        cfg.guidance.allsky_slope = args.allsky_slope
+    if args.ice is not None:
+        cfg.data.ice = args.ice
+    engine = RetrievalEngine.from_checkpoints(cfg, args.stats, args.unet, args.score, rtm_kind=args.rtm)
+    if args.scatter_fit:
+        import json
+        fit = json.load(open(args.rtm_audit))[args.scatter_fit] if (args.rtm_audit and not os.path.exists(args.scatter_fit)) else json.load(open(args.scatter_fit))
+        engine.likelihood.calibrate_scatter(fit, use_mw=args.mw_channels)
+        log.info("loaded ice-scattering fit for channels %s", [ch for ch in fit if fit[ch].get("fitted")])
     if args.rtm_audit and not args.no_rtm:
         import json
         table = json.load(open(args.rtm_audit))[args.audit_table]
